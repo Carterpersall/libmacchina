@@ -621,13 +621,9 @@ impl MacOSPackageReadout {
             packages.push(entries);
         };
 
-        let remaining = packages.iter().filter(|&entry| {
-            if let Ok(x) = entry {
-                x.file_name() != ".keepme"
-            } else {
-                false
-            }
-        });
+        let remaining = packages
+            .iter()
+            .filter(|x| x.as_ref().unwrap().file_name() != ".keepme");
 
         match remaining.count() {
             0 => None,
