@@ -595,37 +595,44 @@ impl MacOSPackageReadout {
         use std::fs::read_dir;
         use std::path::Path;
 
+        let packages = vec![];
         // Homebrew stores packages in /usr/local on older-generation Apple hardware.
         let homebrew_root = Path::new("/usr/local");
         let cellar_folder = homebrew_root.join("Cellar");
         let caskroom_folder = homebrew_root.join("Caskroom");
-
-        let cellar_count = match read_dir(cellar_folder) {
-            Ok(read_dir) => read_dir.count(),
-            Err(_) => 0,
-        };
-
-        let caskroom_count = match read_dir(caskroom_folder) {
-            Ok(read_dir) => read_dir.count(),
-            Err(_) => 0,
-        };
-
         // Homebrew stores packages in /opt/homebrew on Apple Silicon machines.
         let opt_homebrew_root = Path::new("/opt/homebrew");
         let opt_cellar_folder = opt_homebrew_root.join("Cellar");
         let opt_caskroom_folder = opt_homebrew_root.join("Caskroom");
 
-        let opt_cellar_count = match read_dir(opt_cellar_folder) {
-            Ok(read_dir) => read_dir.count(),
-            Err(_) => 0,
+        if let Ok(entries) = read_dir(cellar_folder) {
+            packages.push(entries);
         };
 
-        let opt_caskroom_count = match read_dir(opt_caskroom_folder) {
-            Ok(read_dir) => read_dir.count(),
-            Err(_) => 0,
+        if let Ok(entries) = read_dir(caskroom_folder) {
+            packages.push(entries);
         };
 
-        Some(cellar_count + caskroom_count + opt_cellar_count + opt_caskroom_count)
+        if let Ok(entries) = read_dir(opt_cellar_folder) {
+            packages.push(entries);
+        };
+
+        if let Ok(entries) = read_dir(opt_caskroom_folder) {
+            packages.push(entries);
+        };
+
+        let remaining = packages.iter().filter(|&entry| {
+            if let Ok(x) = entry {
+                x.file_name() != ".keepme"
+            } else {
+                false
+            }
+        });
+
+        match remaining.count() {
+            0 => None,
+            x => Some(x),
+        }
     }
 
     fn count_cargo() -> Option<usize> {
