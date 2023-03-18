@@ -54,7 +54,218 @@ impl BatteryReadout for WindowsBatteryReadout {
     }
 
     fn health(&self) -> Result<u64, ReadoutError> {
-        Err(ReadoutError::NotImplemented)
+        use windows::{
+            core::{ PCWSTR, PWSTR },
+            Win32::Devices::DeviceAndDriverInstallation::{
+                DIGCF_DEVICEINTERFACE,
+                DIGCF_PRESENT,
+                GUID_DEVCLASS_BATTERY,
+                SetupDiDestroyDeviceInfoList,
+                SetupDiEnumDeviceInterfaces,
+                SetupDiGetClassDevsW,
+                SetupDiGetDeviceInterfaceDetailW,
+                SP_DEVICE_INTERFACE_DATA,
+                SP_DEVICE_INTERFACE_DETAIL_DATA_W
+            },
+            Win32::Foundation::{ BOOL, GetLastError, HANDLE, HWND, WIN32_ERROR },
+            Win32::Storage::FileSystem::{ CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING },
+            Win32::System::Diagnostics::Debug::{ FormatMessageW, FORMAT_MESSAGE_ALLOCATE_BUFFER, FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS },
+            Win32::System::IO::DeviceIoControl,
+            Win32::System::Power::{
+                BATTERY_INFORMATION, BATTERY_QUERY_INFORMATION, BATTERY_WAIT_STATUS, BATTERY_STATUS,
+                BatteryInformation, IOCTL_BATTERY_QUERY_INFORMATION, IOCTL_BATTERY_QUERY_STATUS, IOCTL_BATTERY_QUERY_TAG
+            },
+        };
+
+        // Source: https://gist.github.com/ahawker/9715872
+
+        // Function for getting an error message from a Win32 error code
+        // Source: https://github.com/microsoft/windows-rs/blob/master/crates/libs/windows/src/core/hresult.rs#L85
+        fn process_error(error: WIN32_ERROR) -> String {
+            pub struct HeapString(*mut u16);
+
+            // Create buffer for error message
+            let mut message = HeapString(std::ptr::null_mut());
+
+            // Get the error message
+            let size = unsafe {FormatMessageW(
+                FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                std::ptr::null_mut(),
+                error.0,
+                0,
+                PWSTR(std::mem::transmute(&mut message.0)),
+                0,
+                std::ptr::null_mut()
+            )};
+
+            if size == 0 {
+                return format!("FormatMessageW failed while formatting error {:?}: {:?}", error, unsafe{GetLastError()});
+            }
+
+            // Convert the buffer to a string and return
+            return String::from_utf16_lossy(
+                unsafe {
+                    std::slice::from_raw_parts(
+                        message.0 as *const u16,
+                        size as usize,
+                    )
+                }
+            ).trim_end().to_owned();
+        }
+
+        // Get a handle to the system's devices
+        let device_handle = unsafe {
+            match SetupDiGetClassDevsW(
+            &GUID_DEVCLASS_BATTERY,
+            PCWSTR::null(),
+            HWND::default(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE
+            ) {
+                Ok(handle) => handle,
+                Err(e) => return Err(ReadoutError::Other(format!("SetupDiGetClassDevsW failed: {}", e)))
+            }
+        };
+
+        let mut device_interface_data = SP_DEVICE_INTERFACE_DATA::default();
+        device_interface_data.cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
+
+        // Get the battery's interface
+        unsafe {
+            match SetupDiEnumDeviceInterfaces(
+                device_handle,
+                std::ptr::null_mut(),
+                &GUID_DEVCLASS_BATTERY,
+                0,
+                &mut device_interface_data
+            ) {
+                BOOL(1) => (),
+                _ => return Err(ReadoutError::Other(format!("SetupDiEnumDeviceInterfaces failed: {:?}", process_error(GetLastError())))),
+            }
+        };
+
+        let mut required_size = 0;
+        // Get the required size of the buffer
+        // This will return the error ERROR_INSUFFICIENT_BUFFER, which is expected
+        // https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdigetdeviceinterfacedetailw#remarks
+        unsafe {SetupDiGetDeviceInterfaceDetailW(
+            device_handle,
+            &device_interface_data,
+            std::ptr::null_mut(),
+            0,
+            &mut required_size,
+            std::ptr::null_mut()
+        )};
+
+        let mut device_detail_data = unsafe{std::mem::zeroed::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>()};
+        device_detail_data.cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+
+        // Get the device path to the system's battery
+        unsafe {
+            match SetupDiGetDeviceInterfaceDetailW(
+                device_handle,
+                &device_interface_data,
+                &mut device_detail_data,
+                required_size,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ) {
+                BOOL(1) => (),
+                _ => return Err(ReadoutError::Other(format!("SetupDiGetDeviceInterfaceDetailW failed: {:?}", process_error(GetLastError())))),
+            }
+        };
+
+        // Get a handle to the battery
+        let battery_handle = unsafe{
+            match CreateFileW(
+                PCWSTR(device_detail_data.DevicePath.first().unwrap()),
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                HANDLE(0)
+            ) {
+                Ok(handle) => handle,
+                Err(e) => return Err(ReadoutError::Other(format!("CreateFileW failed: {}", e)))
+            }
+        };
+
+        let mut query_information = BATTERY_QUERY_INFORMATION::default();
+
+        // Get the Battery Tag
+        // See https://learn.microsoft.com/en-us/windows/win32/power/battery-information#battery-tags
+        unsafe {
+            match DeviceIoControl(
+                battery_handle,
+                IOCTL_BATTERY_QUERY_TAG,
+                std::ptr::null_mut(),
+                0,
+                &mut query_information.BatteryTag as *mut u32 as *mut _,
+                std::mem::size_of::<u32>() as u32,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) {
+                BOOL(1) => (),
+                _ => return Err(ReadoutError::Other(format!("DeviceIoControl execution 1 failed: {:?}", process_error(GetLastError())))),
+            }
+        };
+
+        // Set the query's information level
+        let mut battery_information = BATTERY_INFORMATION::default();
+        query_information.InformationLevel = BatteryInformation;
+
+        // Get the battery's information
+        unsafe{
+            match DeviceIoControl(
+                battery_handle,
+                IOCTL_BATTERY_QUERY_INFORMATION,
+                &mut query_information as *mut BATTERY_QUERY_INFORMATION as *mut _, // Pointer to query_information
+                std::mem::size_of::<BATTERY_QUERY_INFORMATION>() as u32,          // Size of query_information
+                &mut battery_information as *mut BATTERY_INFORMATION as *mut _,    // Pointer to battery_information
+                std::mem::size_of::<BATTERY_INFORMATION>() as u32,               // Size of battery_information
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) {
+                BOOL(1) => (),
+                _ => return Err(ReadoutError::Other(format!("DeviceIoControl execution 2 failed: {:?}", process_error(GetLastError())))),
+            }
+        };
+
+        // Battery Status not needed for Battery Health
+        /*
+        let mut battery_wait_status = BATTERY_WAIT_STATUS::default();
+        battery_wait_status.BatteryTag = query_information.BatteryTag;
+
+        let mut battery_status = BATTERY_STATUS::default();
+
+        // Get the battery's status
+        unsafe{
+            match DeviceIoControl(
+                battery_handle,
+                IOCTL_BATTERY_QUERY_STATUS,
+                &mut battery_wait_status as *mut BATTERY_WAIT_STATUS as *mut _, // Pointer to battery_wait_status
+                std::mem::size_of::<BATTERY_WAIT_STATUS>() as u32,            // Size of battery_wait_status
+                &mut battery_status as *mut BATTERY_STATUS as *mut _,          // Pointer to battery_status
+                std::mem::size_of::<BATTERY_STATUS>() as u32,                // Size of battery_status
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) {
+                BOOL(1) => (),
+                _ => return Err(ReadoutError::Other(format!("DeviceIoControl execution 3 failed: {:?}", process_error(GetLastError())))),
+            }
+        };
+        */
+
+        // Release the handle to the device
+        unsafe {
+            match SetupDiDestroyDeviceInfoList(device_handle) {
+                BOOL(1) => (),
+                _ => return Err(ReadoutError::Other(format!("SetupDiDestroyDeviceInfoList failed: {:?}", process_error(GetLastError())))),
+            }
+        };
+
+        // Return the battery health
+        return Ok((battery_information.FullChargedCapacity as f64/ battery_information.DesignedCapacity as f64 * 100.0) as u64);
     }
 }
 
