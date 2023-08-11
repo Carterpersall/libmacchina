@@ -174,23 +174,17 @@ pub(crate) fn shell(shorthand: ShellFormat, kind: ShellKind) -> Result<String, R
             )))
         }
         ShellKind::Current => {
-            if cfg!(target_os = "macos") {
-                Err(ReadoutError::Other(String::from(
-                    "Retrieving the current shell is not supported on macOS.",
-                )))
-            } else {
-                let path = PathBuf::from("/proc")
-                    .join(unsafe { libc::getppid() }.to_string())
-                    .join("comm");
+            let path = PathBuf::from("/proc")
+                .join(unsafe { libc::getppid() }.to_string())
+                .join("comm");
 
-                if let Ok(shell) = read_to_string(path) {
-                    return Ok(shell);
-                }
-
-                Err(ReadoutError::Other(String::from(
-                    "Unable to read current shell.",
-                )))
+            if let Ok(shell) = read_to_string(path) {
+                return Ok(shell);
             }
+
+            Err(ReadoutError::Other(String::from(
+                "Unable to read current shell.",
+            )))
         }
     }
 }
