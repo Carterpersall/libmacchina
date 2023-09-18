@@ -1,9 +1,14 @@
 # Changelog
 
-## `8.0.0`
+## `7.1.0`
 
-- Rolv Apneseth:
-  - BREAKING CHANGE: Allow disk_space function to accept a path argument (#156)
+- Silas Groh:
+  - Add support for `ndb` databases
+- Adrian Groh:
+  - Replace `mach` dependency with `mach2`
+  - Replace `python` command with `sh` in `extra::which` unit tests
+  - Add armv7 to the list of build targets in the CI pipeline
+  - Fix compilation issues for armv7 build target
 
 ## `7.0.0`
 

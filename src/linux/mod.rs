@@ -117,7 +117,7 @@ impl BatteryReadout for LinuxBatteryReadout {
         Err(ReadoutError::Other("No batteries detected.".to_string()))
     }
 
-    fn health(&self) -> Result<u64, ReadoutError> {
+    fn health(&self) -> Result<u8, ReadoutError> {
         if let Some(entries) = get_entries(Path::new("/sys/class/power_supply")) {
             let dirs: Vec<PathBuf> = entries
                 .into_iter()
@@ -134,20 +134,20 @@ impl BatteryReadout for LinuxBatteryReadout {
             if let Some(battery) = dirs.first() {
                 let energy_full =
                     extra::pop_newline(fs::read_to_string(battery.join("energy_full"))?)
-                        .parse::<u64>();
+                        .parse::<u8>();
 
                 let energy_full_design =
                     extra::pop_newline(fs::read_to_string(battery.join("energy_full_design"))?)
-                        .parse::<u64>();
+                        .parse::<u8>();
 
                 match (energy_full, energy_full_design) {
                     (Ok(mut ef), Ok(efd)) => {
                         if ef > efd {
                             ef = efd;
-                            return Ok(((ef as f64 / efd as f64) * 100_f64) as u64);
+                            return Ok((ef as f32 / efd as f32 * 100_f32).ceil() as u8);
                         }
 
-                        return Ok(((ef as f64 / efd as f64) * 100_f64) as u64);
+                        return Ok((ef as f32 / efd as f32 * 100_f32).ceil() as u8);
                     }
                     _ => {
                         return Err(ReadoutError::Other(
@@ -736,25 +736,30 @@ impl LinuxPackageReadout {
     fn count_rpm() -> Option<usize> {
         // Return the number of installed packages using sqlite (~1ms)
         // as directly calling rpm or dnf is too expensive (~500ms)
-        let db = "/var/lib/rpm/rpmdb.sqlite";
-        if !Path::new(db).is_file() {
-            return None;
-        }
+        let count_sqlite = 'sqlite: {
+            let db = "/var/lib/rpm/rpmdb.sqlite";
+            if !Path::new(db).is_file() {
+                break 'sqlite None;
+            }
 
-        let connection = sqlite::open(db);
-        if let Ok(con) = connection {
-            let statement = con.prepare("SELECT COUNT(*) FROM Installtid");
-            if let Ok(mut s) = statement {
-                if s.next().is_ok() {
-                    return match s.read::<Option<i64>>(0) {
-                        Ok(Some(count)) => Some(count as usize),
-                        _ => None,
-                    };
+            let connection = sqlite::open(db);
+            if let Ok(con) = connection {
+                let statement = con.prepare("SELECT COUNT(*) FROM Installtid");
+                if let Ok(mut s) = statement {
+                    if s.next().is_ok() {
+                        break 'sqlite match s.read::<Option<i64>>(0) {
+                            Ok(Some(count)) => Some(count as usize),
+                            _ => None,
+                        };
+                    }
                 }
             }
-        }
 
-        None
+            None
+        };
+
+        // If counting with sqlite failed, try using librpm instead
+        count_sqlite.or_else(|| unsafe { rpm_pkg_count::count() }.map(|count| count as usize))
     }
 
     /// Returns the number of installed packages for systems
